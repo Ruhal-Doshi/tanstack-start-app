@@ -1,0 +1,22 @@
+{
+  "projectName": "tanstack-start-app",
+  "mode": "file-router",
+  "typescript": true,
+  "packageManager": "pnpm",
+  "tailwind": true,
+  "addOnOptions": {},
+  "git": true,
+  "version": 1,
+  "framework": "react-cra",
+  "chosenAddOns": [
+    "eslint",
+    "nitro",
+    "start",
+    "clerk",
+    "convex",
+    "compiler",
+    "shadcn",
+    "t3env",
+    "tanstack-query"
+  ]
+}
