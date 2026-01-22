@@ -42,7 +42,17 @@ export const Route = createFileRoute('/api/chat')({
         }
 
         const body = await request.json()
-        const { messages, sessionId, anonymousId, userMessageId } = body
+        const {
+          messages,
+          sessionId,
+          anonymousId,
+          userMessageId,
+          isAnonymous,
+          messageHistory,
+        } = body
+
+        // For anonymous users, we don't use Convex at all
+        const isAnon = isAnonymous === true
 
         // Use authenticated user ID or anonymous ID
         const currentUserId = userId || anonymousId
@@ -73,42 +83,53 @@ export const Route = createFileRoute('/api/chat')({
             : ''
 
         try {
-          // Create session in Convex for new sessions
-          if (isNewSession && convex) {
-            await convex.mutation(api.chat.createSession, {
-              sessionId: currentSessionId,
-              userId: currentUserId,
-              title: userMessageContent.slice(0, 50) || 'New Chat',
-            })
+          // For authenticated users: use Convex
+          // For anonymous users: skip Convex entirely
+
+          if (!isAnon && convex) {
+            // Create session in Convex for new sessions
+            if (isNewSession) {
+              await convex.mutation(api.chat.createSession, {
+                sessionId: currentSessionId,
+                userId: currentUserId,
+                title: userMessageContent.slice(0, 50) || 'New Chat',
+              })
+            }
+
+            // Save the user message to Convex immediately
+            if (userMessageContent) {
+              await convex.mutation(api.chat.addMessage, {
+                sessionId: currentSessionId,
+                messageId: currentUserMessageId,
+                role: 'user',
+                content: userMessageContent,
+              })
+            }
           }
 
-          // Save the user message to Convex immediately
-          if (convex && userMessageContent) {
-            await convex.mutation(api.chat.addMessage, {
-              sessionId: currentSessionId,
-              messageId: currentUserMessageId,
-              role: 'user',
-              content: userMessageContent,
-            })
-          }
-
-          // Fetch stored messages from Convex (excluding the one we just added)
-          let storedMessages: Array<{
+          // Determine messages to use for context
+          let allMessages: Array<{
             role: 'user' | 'assistant'
             content: string
           }> = []
-          if (convex) {
+
+          if (isAnon) {
+            // For anonymous users, use the message history passed from client
+            // Plus add the current user message
+            allMessages = [
+              ...(messageHistory || []),
+              { role: 'user' as const, content: userMessageContent },
+            ]
+          } else if (convex) {
+            // For authenticated users, fetch from Convex
             const convexMessages = await convex.query(api.chat.getMessages, {
               sessionId: currentSessionId,
             })
-            storedMessages = convexMessages.map((msg) => ({
+            allMessages = convexMessages.map((msg) => ({
               role: msg.role as 'user' | 'assistant',
               content: msg.content,
             }))
           }
-
-          // Use stored messages for context (they now include the user message we just added)
-          const allMessages = storedMessages
 
           // Create a streaming chat response
           const chatStream = chat({
@@ -151,7 +172,8 @@ export const Route = createFileRoute('/api/chat')({
               yield chunk
             }
             // Save the assistant response to Convex after streaming completes
-            if (convex && fullResponse) {
+            // Only for authenticated users (not anonymous)
+            if (!isAnon && convex && fullResponse) {
               await convex.mutation(api.chat.addMessage, {
                 sessionId: currentSessionId,
                 messageId: assistantMessageId,

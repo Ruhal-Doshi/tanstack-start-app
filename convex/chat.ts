@@ -1,10 +1,16 @@
 import { mutation, query } from './_generated/server'
 import { v } from 'convex/values'
+import { getAuthenticatedUserId, requireAuth } from './auth'
 
 // Get all sessions for a user, ordered by most recent
 export const listSessions = query({
   args: { userId: v.string() },
   handler: async (ctx, args) => {
+    // Verify the authenticated user matches the requested userId
+    const authUserId = await getAuthenticatedUserId(ctx)
+    if (!authUserId || authUserId !== args.userId) {
+      return []
+    }
     return await ctx.db
       .query('chatSessions')
       .withIndex('by_user_and_time', (q) => q.eq('userId', args.userId))
@@ -17,10 +23,19 @@ export const listSessions = query({
 export const getSession = query({
   args: { sessionId: v.string() },
   handler: async (ctx, args) => {
-    return await ctx.db
+    const authUserId = await getAuthenticatedUserId(ctx)
+    if (!authUserId) {
+      return null
+    }
+    const session = await ctx.db
       .query('chatSessions')
       .withIndex('by_session_id', (q) => q.eq('sessionId', args.sessionId))
       .first()
+    // Only return if session belongs to authenticated user
+    if (session && session.userId !== authUserId) {
+      return null
+    }
+    return session
   },
 })
 
@@ -28,6 +43,18 @@ export const getSession = query({
 export const getMessages = query({
   args: { sessionId: v.string() },
   handler: async (ctx, args) => {
+    const authUserId = await getAuthenticatedUserId(ctx)
+    if (!authUserId) {
+      return []
+    }
+    // Verify session belongs to authenticated user
+    const session = await ctx.db
+      .query('chatSessions')
+      .withIndex('by_session_id', (q) => q.eq('sessionId', args.sessionId))
+      .first()
+    if (!session || session.userId !== authUserId) {
+      return []
+    }
     return await ctx.db
       .query('chatMessages')
       .withIndex('by_session_and_time', (q) =>
@@ -64,6 +91,12 @@ export const updateSession = mutation({
     title: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Require authentication
+    const authUserId = await getAuthenticatedUserId(ctx)
+    if (!authUserId) {
+      throw new Error('Unauthorized')
+    }
+
     const session = await ctx.db
       .query('chatSessions')
       .withIndex('by_session_id', (q) => q.eq('sessionId', args.sessionId))
@@ -71,6 +104,9 @@ export const updateSession = mutation({
 
     if (!session) {
       throw new Error('Session not found')
+    }
+    if (session.userId !== authUserId) {
+      throw new Error('Unauthorized')
     }
 
     return await ctx.db.patch(session._id, {
@@ -84,6 +120,25 @@ export const updateSession = mutation({
 export const deleteSession = mutation({
   args: { sessionId: v.string() },
   handler: async (ctx, args) => {
+    // Require authentication for client-side delete
+    const authUserId = await getAuthenticatedUserId(ctx)
+    if (!authUserId) {
+      throw new Error('Unauthorized')
+    }
+
+    // Verify session belongs to authenticated user
+    const session = await ctx.db
+      .query('chatSessions')
+      .withIndex('by_session_id', (q) => q.eq('sessionId', args.sessionId))
+      .first()
+
+    if (!session) {
+      throw new Error('Session not found')
+    }
+    if (session.userId !== authUserId) {
+      throw new Error('Unauthorized')
+    }
+
     // Delete all messages in the session
     const messages = await ctx.db
       .query('chatMessages')
@@ -95,14 +150,7 @@ export const deleteSession = mutation({
     }
 
     // Delete the session
-    const session = await ctx.db
-      .query('chatSessions')
-      .withIndex('by_session_id', (q) => q.eq('sessionId', args.sessionId))
-      .first()
-
-    if (session) {
-      await ctx.db.delete(session._id)
-    }
+    await ctx.db.delete(session._id)
   },
 })
 
