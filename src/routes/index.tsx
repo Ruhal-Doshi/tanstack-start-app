@@ -128,11 +128,20 @@ function ChatPage() {
         headers['Authorization'] = `Bearer ${token}`
       }
 
-      // For anonymous users, pass the full message history
+      // Build message history from stored messages
+      // For anonymous users: from localStorage
+      // For authenticated users: from Convex (already loaded via useQuery)
       let messageHistory: Array<{ role: string; content: string }> = []
       if (!isAuthenticatedRef.current && sessionIdRef.current) {
+        // Anonymous: get from localStorage
         const anonMsgs = getAnonMessages(sessionIdRef.current)
         messageHistory = anonMsgs.map((m) => ({
+          role: m.role,
+          content: m.content,
+        }))
+      } else if (isAuthenticatedRef.current && storedMessages) {
+        // Authenticated: use Convex messages already loaded
+        messageHistory = storedMessages.map((m) => ({
           role: m.role,
           content: m.content,
         }))

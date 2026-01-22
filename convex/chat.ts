@@ -1,6 +1,15 @@
-import { mutation, query } from './_generated/server'
+import {
+  mutation,
+  query,
+  internalMutation,
+  internalQuery,
+} from './_generated/server'
 import { v } from 'convex/values'
-import { getAuthenticatedUserId, requireAuth } from './auth'
+import { getAuthenticatedUserId } from './auth'
+
+// ============================================
+// PUBLIC QUERIES (called from client, require auth)
+// ============================================
 
 // Get all sessions for a user, ordered by most recent
 export const listSessions = query({
@@ -39,7 +48,7 @@ export const getSession = query({
   },
 })
 
-// Get all messages for a session, ordered by time
+// Get all messages for a session, ordered by time (client-facing, requires auth)
 export const getMessages = query({
   args: { sessionId: v.string() },
   handler: async (ctx, args) => {
@@ -65,7 +74,82 @@ export const getMessages = query({
   },
 })
 
-// Create a new chat session
+// ============================================
+// INTERNAL QUERIES/MUTATIONS (called from server, no client auth)
+// These are only callable from other Convex functions or via internal API
+// The server already verifies the Clerk JWT before calling these
+// ============================================
+
+// Internal: Get messages for a session (server-side use)
+export const internalGetMessages = internalQuery({
+  args: { sessionId: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query('chatMessages')
+      .withIndex('by_session_and_time', (q) =>
+        q.eq('sessionId', args.sessionId),
+      )
+      .order('asc')
+      .collect()
+  },
+})
+
+// Internal: Create a new chat session (server-side use)
+export const internalCreateSession = internalMutation({
+  args: {
+    sessionId: v.string(),
+    userId: v.string(),
+    title: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now()
+    return await ctx.db.insert('chatSessions', {
+      sessionId: args.sessionId,
+      userId: args.userId,
+      title: args.title,
+      createdAt: now,
+      updatedAt: now,
+    })
+  },
+})
+
+// Internal: Add a message to a session (server-side use)
+export const internalAddMessage = internalMutation({
+  args: {
+    sessionId: v.string(),
+    messageId: v.string(),
+    role: v.union(v.literal('user'), v.literal('assistant')),
+    content: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now()
+
+    // Update session's updatedAt timestamp
+    const session = await ctx.db
+      .query('chatSessions')
+      .withIndex('by_session_id', (q) => q.eq('sessionId', args.sessionId))
+      .first()
+
+    if (session) {
+      await ctx.db.patch(session._id, { updatedAt: now })
+    }
+
+    // Insert the message
+    return await ctx.db.insert('chatMessages', {
+      sessionId: args.sessionId,
+      messageId: args.messageId,
+      role: args.role,
+      content: args.content,
+      createdAt: now,
+    })
+  },
+})
+
+// ============================================
+// PUBLIC MUTATIONS (called from client, require auth where needed)
+// ============================================
+
+// Create a new chat session (public, called from server after JWT verification)
 export const createSession = mutation({
   args: {
     sessionId: v.string(),

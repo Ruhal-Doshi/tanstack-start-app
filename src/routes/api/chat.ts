@@ -108,28 +108,21 @@ export const Route = createFileRoute('/api/chat')({
           }
 
           // Determine messages to use for context
+          // For both anonymous and authenticated users, we use messageHistory from the client
+          // This is the already-loaded messages from either localStorage or Convex
+          // The current user message is added on top of the history
           let allMessages: Array<{
             role: 'user' | 'assistant'
             content: string
-          }> = []
-
-          if (isAnon) {
-            // For anonymous users, use the message history passed from client
-            // Plus add the current user message
-            allMessages = [
-              ...(messageHistory || []),
-              { role: 'user' as const, content: userMessageContent },
-            ]
-          } else if (convex) {
-            // For authenticated users, fetch from Convex
-            const convexMessages = await convex.query(api.chat.getMessages, {
-              sessionId: currentSessionId,
-            })
-            allMessages = convexMessages.map((msg) => ({
-              role: msg.role as 'user' | 'assistant',
-              content: msg.content,
-            }))
-          }
+          }> = [
+            ...(messageHistory || []).map(
+              (m: { role: string; content: string }) => ({
+                role: m.role as 'user' | 'assistant',
+                content: m.content,
+              }),
+            ),
+            { role: 'user' as const, content: userMessageContent },
+          ]
 
           // Create a streaming chat response
           const chatStream = chat({
