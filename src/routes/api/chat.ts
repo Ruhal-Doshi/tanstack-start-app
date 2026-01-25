@@ -9,6 +9,28 @@ import { api } from '../../../convex/_generated/api'
 const convexUrl = process.env.CONVEX_URL
 const convex = convexUrl ? new ConvexHttpClient(convexUrl) : null
 
+// Rate limits
+const AUTHENTICATED_USER_LIMIT = 10
+const ANONYMOUS_USER_LIMIT = 5
+
+// Get client IP from request headers
+function getClientIP(request: Request): string {
+  // Check common headers for proxied requests
+  const forwardedFor = request.headers.get('x-forwarded-for')
+  if (forwardedFor) {
+    // x-forwarded-for can contain multiple IPs, take the first one
+    return forwardedFor.split(',')[0].trim()
+  }
+
+  const realIP = request.headers.get('x-real-ip')
+  if (realIP) {
+    return realIP.trim()
+  }
+
+  // Fallback - in production this should be configured properly
+  return 'unknown'
+}
+
 export const Route = createFileRoute('/api/chat')({
   server: {
     handlers: {
@@ -61,6 +83,52 @@ export const Route = createFileRoute('/api/chat')({
             JSON.stringify({ error: 'User identification required' }),
             { status: 400, headers: { 'Content-Type': 'application/json' } },
           )
+        }
+
+        // ========================================
+        // Rate Limiting Check
+        // ========================================
+        const clientIP = getClientIP(request)
+        const rateLimitIdentifier = userId || clientIP
+        const identifierType = userId ? 'user' : 'ip'
+        const rateLimit = userId
+          ? AUTHENTICATED_USER_LIMIT
+          : ANONYMOUS_USER_LIMIT
+
+        if (convex) {
+          try {
+            const rateLimitStatus = await convex.query(
+              api.rateLimit.checkRateLimit,
+              {
+                identifier: rateLimitIdentifier,
+                identifierType: identifierType as 'user' | 'ip',
+              },
+            )
+
+            if (!rateLimitStatus.allowed) {
+              return new Response(
+                JSON.stringify({
+                  error: 'Rate limit exceeded',
+                  message: `You have reached your daily limit of ${rateLimit} messages. Please try again tomorrow.`,
+                  limit: rateLimitStatus.limit,
+                  remaining: 0,
+                  resetAt: rateLimitStatus.resetAt,
+                }),
+                {
+                  status: 429,
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'X-RateLimit-Limit': String(rateLimitStatus.limit),
+                    'X-RateLimit-Remaining': '0',
+                    'X-RateLimit-Reset': rateLimitStatus.resetAt,
+                  },
+                },
+              )
+            }
+          } catch (error) {
+            // If rate limit check fails, log but continue (fail open)
+            console.error('Rate limit check failed:', error)
+          }
         }
 
         // Generate a new session ID if not provided
@@ -124,9 +192,9 @@ export const Route = createFileRoute('/api/chat')({
             { role: 'user' as const, content: userMessageContent },
           ]
 
-          // Create a streaming chat response
+          // Create a streaming chat response using gpt-5-nano
           const chatStream = chat({
-            adapter: openaiText('gpt-4o-mini'),
+            adapter: openaiText('gpt-5-nano'),
             messages: allMessages,
             conversationId: currentSessionId,
           })
@@ -173,6 +241,19 @@ export const Route = createFileRoute('/api/chat')({
                 role: 'assistant',
                 content: fullResponse,
               })
+            }
+
+            // Increment rate limit counter after successful response
+            if (convex && fullResponse) {
+              try {
+                await convex.mutation(api.rateLimit.incrementRateLimit, {
+                  identifier: rateLimitIdentifier,
+                  identifierType: identifierType as 'user' | 'ip',
+                })
+              } catch (error) {
+                // Log but don't fail the request
+                console.error('Failed to increment rate limit:', error)
+              }
             }
           }
 

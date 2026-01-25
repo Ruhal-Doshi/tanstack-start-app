@@ -126,13 +126,15 @@ export function ChatSidebar({
                   )}
                 >
                   <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate">{session.title}</span>
+                  <span className="flex-1 truncate min-w-0">
+                    {session.title}
+                  </span>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
                         onClick={(e) => onDeleteSession(session.id, e)}
                       >
                         <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />

@@ -12,6 +12,7 @@ import {
   ChatInput,
   ChatHeader,
   ChatSkeleton,
+  RateLimitModal,
   type ChatMessage,
   type ChatMessagesHandle,
 } from '@/components/chat'
@@ -45,6 +46,13 @@ function ChatPage() {
   const [inputValue, setInputValue] = useState('')
   const chatMessagesRef = useRef<ChatMessagesHandle>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // Rate limit modal state
+  const [rateLimitModalOpen, setRateLimitModalOpen] = useState(false)
+  const [rateLimitInfo, setRateLimitInfo] = useState<{
+    limit: number
+    resetAt?: string
+  }>({ limit: 5 })
 
   // Get auth token from Clerk
   const { getToken, userId: clerkUserId, isLoaded: isClerkLoaded } = useAuth()
@@ -310,13 +318,69 @@ function ChatPage() {
       currentAssistantMessageIdRef.current = null
       pendingUserMessageRef.current = null
     },
+    onError: (error: Error) => {
+      // Check if error message contains rate limit info
+      const errorMessage = error.message || ''
+      if (
+        errorMessage.includes('429') ||
+        errorMessage.includes('Rate limit') ||
+        errorMessage.includes('rate limit')
+      ) {
+        // Try to parse rate limit details from error
+        try {
+          const match = errorMessage.match(/limit of (\d+)/)
+          const limit = match
+            ? parseInt(match[1], 10)
+            : isAuthenticated
+              ? 10
+              : 5
+          setRateLimitInfo({ limit })
+        } catch {
+          setRateLimitInfo({ limit: isAuthenticated ? 10 : 5 })
+        }
+        setRateLimitModalOpen(true)
+      }
+      // Clear pending state on error
+      currentUserMessageIdRef.current = null
+      currentAssistantMessageIdRef.current = null
+      pendingUserMessageRef.current = null
+    },
   })
 
   // Wrap sendMessage to generate userMessageId and track content
-  const sendMessage = (content: string) => {
+  const sendMessage = async (content: string) => {
     currentUserMessageIdRef.current = crypto.randomUUID()
     pendingUserMessageRef.current = content
-    return originalSendMessage(content)
+    try {
+      await originalSendMessage(content)
+    } catch (error) {
+      // Handle rate limit error from fetch
+      if (error instanceof Response && error.status === 429) {
+        try {
+          const data = await error.json()
+          setRateLimitInfo({
+            limit: data.limit || (isAuthenticated ? 10 : 5),
+            resetAt: data.resetAt,
+          })
+        } catch {
+          setRateLimitInfo({ limit: isAuthenticated ? 10 : 5 })
+        }
+        setRateLimitModalOpen(true)
+      } else if (error instanceof Error) {
+        // Check error message for rate limit
+        const errorMessage = error.message || ''
+        if (
+          errorMessage.includes('429') ||
+          errorMessage.includes('Rate limit')
+        ) {
+          setRateLimitInfo({ limit: isAuthenticated ? 10 : 5 })
+          setRateLimitModalOpen(true)
+        }
+      }
+      // Clear pending state
+      currentUserMessageIdRef.current = null
+      pendingUserMessageRef.current = null
+    }
   }
 
   // Combine stored messages with the currently streaming message
@@ -509,6 +573,15 @@ function ChatPage() {
           />
         </div>
       </div>
+
+      {/* Rate Limit Modal */}
+      <RateLimitModal
+        open={rateLimitModalOpen}
+        onClose={() => setRateLimitModalOpen(false)}
+        isAuthenticated={isAuthenticated}
+        limit={rateLimitInfo.limit}
+        resetAt={rateLimitInfo.resetAt}
+      />
     </TooltipProvider>
   )
 }

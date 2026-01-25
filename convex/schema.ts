@@ -25,4 +25,15 @@ export default defineSchema({
     .index('by_session_id', ['sessionId'])
     .index('by_session_and_time', ['sessionId', 'createdAt'])
     .index('by_message_id', ['messageId']),
+
+  // Rate limiting - tracks daily message counts
+  rateLimits: defineTable({
+    identifier: v.string(), // userId for auth users, IP address for anonymous
+    identifierType: v.union(v.literal('user'), v.literal('ip')),
+    date: v.string(), // YYYY-MM-DD format for daily tracking
+    messageCount: v.number(), // Number of messages sent today
+    updatedAt: v.number(), // Last update timestamp
+  })
+    .index('by_identifier_and_date', ['identifier', 'date'])
+    .index('by_date', ['date']), // For cleanup of old records
 })
