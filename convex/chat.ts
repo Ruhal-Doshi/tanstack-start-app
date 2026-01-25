@@ -5,13 +5,14 @@ import {
   internalQuery,
 } from './_generated/server'
 import { v } from 'convex/values'
+import { paginationOptsValidator } from 'convex/server'
 import { getAuthenticatedUserId } from './auth'
 
 // ============================================
 // PUBLIC QUERIES (called from client, require auth)
 // ============================================
 
-// Get all sessions for a user, ordered by most recent
+// Get all sessions for a user, ordered by most recent (legacy, fetches all)
 export const listSessions = query({
   args: { userId: v.string() },
   handler: async (ctx, args) => {
@@ -25,6 +26,31 @@ export const listSessions = query({
       .withIndex('by_user_and_time', (q) => q.eq('userId', args.userId))
       .order('desc')
       .collect()
+  },
+})
+
+// Paginated sessions query - compatible with usePaginatedQuery
+export const listSessionsPaginated = query({
+  args: {
+    userId: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const authUserId = await getAuthenticatedUserId(ctx)
+    if (!authUserId || authUserId !== args.userId) {
+      // Return empty paginated result
+      return {
+        page: [],
+        isDone: true,
+        continueCursor: '',
+      }
+    }
+
+    return await ctx.db
+      .query('chatSessions')
+      .withIndex('by_user_and_time', (q) => q.eq('userId', args.userId))
+      .order('desc')
+      .paginate(args.paginationOpts)
   },
 })
 
@@ -71,6 +97,48 @@ export const getMessages = query({
       )
       .order('asc')
       .collect()
+  },
+})
+
+// Paginated messages query - compatible with usePaginatedQuery
+// Note: Convex pagination always returns in query order, so we query desc (newest first)
+// and the client will reverse if needed for display
+export const getMessagesPaginated = query({
+  args: {
+    sessionId: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const authUserId = await getAuthenticatedUserId(ctx)
+    if (!authUserId) {
+      return {
+        page: [],
+        isDone: true,
+        continueCursor: '',
+      }
+    }
+
+    const session = await ctx.db
+      .query('chatSessions')
+      .withIndex('by_session_id', (q) => q.eq('sessionId', args.sessionId))
+      .first()
+
+    if (!session || session.userId !== authUserId) {
+      return {
+        page: [],
+        isDone: true,
+        continueCursor: '',
+      }
+    }
+
+    // Query in ascending order (chronological) for chat display
+    return await ctx.db
+      .query('chatMessages')
+      .withIndex('by_session_and_time', (q) =>
+        q.eq('sessionId', args.sessionId),
+      )
+      .order('asc')
+      .paginate(args.paginationOpts)
   },
 })
 

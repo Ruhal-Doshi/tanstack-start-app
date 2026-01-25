@@ -1,10 +1,10 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { z } from 'zod'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useChat, fetchServerSentEvents } from '@tanstack/ai-react'
 import { useAuth } from '@clerk/clerk-react'
-import { useQuery, useMutation } from 'convex/react'
+import { usePaginatedQuery, useMutation, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import {
   ChatSidebar,
@@ -13,6 +13,7 @@ import {
   ChatHeader,
   ChatSkeleton,
   type ChatMessage,
+  type ChatMessagesHandle,
 } from '@/components/chat'
 import {
   type AnonSession,
@@ -20,6 +21,8 @@ import {
   getAnonymousUserId,
   getAnonSessions,
   getAnonMessages,
+  getAnonSessionsPaginated,
+  getAnonMessagesPaginated,
   saveAnonMessage,
   createAnonSession,
   deleteAnonSession,
@@ -40,39 +43,106 @@ function ChatPage() {
   const { sessionId } = Route.useSearch()
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [inputValue, setInputValue] = useState('')
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const chatMessagesRef = useRef<ChatMessagesHandle>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Get auth token from Clerk
   const { getToken, userId: clerkUserId, isLoaded: isClerkLoaded } = useAuth()
   const isAuthenticated = !!clerkUserId
 
-  // For anonymous users, manage sessions/messages in localStorage
+  // For anonymous users, manage sessions/messages in localStorage with pagination
   const [anonSessions, setAnonSessions] = useState<AnonSession[]>([])
+  const [anonSessionsHasMore, setAnonSessionsHasMore] = useState(false)
+  const [anonSessionsCursor, setAnonSessionsCursor] = useState<number | null>(
+    null,
+  )
   const [anonMessages, setAnonMessages] = useState<AnonMessage[]>([])
+  const [anonMessagesHasMore, setAnonMessagesHasMore] = useState(false)
+  const [anonMessagesCursor, setAnonMessagesCursor] = useState<number | null>(
+    null,
+  )
 
-  // Load anonymous data from localStorage
+  // Load anonymous sessions with pagination
+  const loadAnonSessions = useCallback(
+    (reset = false) => {
+      const cursor = reset ? null : anonSessionsCursor
+      const result = getAnonSessionsPaginated(cursor)
+      if (reset) {
+        setAnonSessions(result.sessions)
+      } else {
+        setAnonSessions((prev) => [...prev, ...result.sessions])
+      }
+      setAnonSessionsHasMore(result.hasMore)
+      setAnonSessionsCursor(result.nextCursor)
+    },
+    [anonSessionsCursor],
+  )
+
+  // Load anonymous messages with pagination
+  const loadAnonMessages = useCallback(
+    (sid: string, reset = false) => {
+      const cursor = reset ? null : anonMessagesCursor
+      const result = getAnonMessagesPaginated(sid, cursor)
+      if (reset) {
+        setAnonMessages(result.messages)
+      } else {
+        // Prepend older messages
+        setAnonMessages((prev) => [...result.messages, ...prev])
+      }
+      setAnonMessagesHasMore(result.hasMore)
+      setAnonMessagesCursor(result.nextCursor)
+    },
+    [anonMessagesCursor],
+  )
+
+  // Initial load for anonymous users
   useEffect(() => {
     if (!isAuthenticated) {
-      setAnonSessions(getAnonSessions())
+      loadAnonSessions(true)
       if (sessionId) {
-        setAnonMessages(getAnonMessages(sessionId))
+        loadAnonMessages(sessionId, true)
       } else {
         setAnonMessages([])
+        setAnonMessagesHasMore(false)
+        setAnonMessagesCursor(null)
       }
     }
   }, [isAuthenticated, sessionId])
 
-  // Convex queries and mutations (only for authenticated users)
-  const convexSessions = useQuery(
-    api.chat.listSessions,
+  // Convex paginated queries (only for authenticated users)
+  const {
+    results: convexSessions,
+    status: sessionsStatus,
+    loadMore: loadMoreSessions,
+  } = usePaginatedQuery(
+    api.chat.listSessionsPaginated,
     isAuthenticated && clerkUserId ? { userId: clerkUserId } : 'skip',
+    { initialNumItems: 20 },
   )
-  const convexMessages = useQuery(
+
+  const {
+    results: convexMessages,
+    status: messagesStatus,
+    loadMore: loadMoreMessages,
+  } = usePaginatedQuery(
+    api.chat.getMessagesPaginated,
+    isAuthenticated && sessionId ? { sessionId } : 'skip',
+    { initialNumItems: 50 },
+  )
+
+  // Also keep the full messages query for sending to API (all messages for context)
+  const allConvexMessages = useQuery(
     api.chat.getMessages,
     isAuthenticated && sessionId ? { sessionId } : 'skip',
   )
+
   const deleteSessionMutation = useMutation(api.chat.deleteSession)
+
+  // Determine loading states
+  const isLoadingMoreSessions = sessionsStatus === 'LoadingMore'
+  const sessionsHasMore = sessionsStatus === 'CanLoadMore'
+  const isLoadingMoreMessages = messagesStatus === 'LoadingMore'
+  const messagesHasMore = messagesStatus === 'CanLoadMore'
 
   // Use Convex data for auth users, localStorage for anonymous
   const sessions = isAuthenticated ? convexSessions : anonSessions
@@ -85,7 +155,11 @@ function ChatPage() {
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null)
   const pendingUserMessageRef = useRef<string | null>(null)
   const isAuthenticatedRef = useRef(isAuthenticated)
+  const storedMessagesRef = useRef(storedMessages)
+  const allConvexMessagesRef = useRef(allConvexMessages)
   isAuthenticatedRef.current = isAuthenticated
+  storedMessagesRef.current = storedMessages
+  allConvexMessagesRef.current = allConvexMessages
 
   // Keep the ref in sync with the search param
   useEffect(() => {
@@ -129,19 +203,19 @@ function ChatPage() {
       }
 
       // Build message history from stored messages
-      // For anonymous users: from localStorage
-      // For authenticated users: from Convex (already loaded via useQuery)
+      // For anonymous users: from localStorage (all messages)
+      // For authenticated users: from Convex (all messages, not paginated)
       let messageHistory: Array<{ role: string; content: string }> = []
       if (!isAuthenticatedRef.current && sessionIdRef.current) {
-        // Anonymous: get from localStorage
+        // Anonymous: get all messages from localStorage
         const anonMsgs = getAnonMessages(sessionIdRef.current)
         messageHistory = anonMsgs.map((m) => ({
           role: m.role,
           content: m.content,
         }))
-      } else if (isAuthenticatedRef.current && storedMessages) {
-        // Authenticated: use Convex messages already loaded
-        messageHistory = storedMessages.map((m) => ({
+      } else if (isAuthenticatedRef.current && allConvexMessagesRef.current) {
+        // Authenticated: use all Convex messages (not paginated) for full context
+        messageHistory = allConvexMessagesRef.current.map((m) => ({
           role: m.role,
           content: m.content,
         }))
@@ -311,10 +385,12 @@ function ChatPage() {
     return baseMsgs
   }, [storedMessages, messages, isLoading, isAuthenticated])
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [allMessages])
+    if (allMessages.length > 0) {
+      chatMessagesRef.current?.scrollToBottom()
+    }
+  }, [allMessages.length])
 
   // Focus input on mount
   useEffect(() => {
@@ -323,11 +399,23 @@ function ChatPage() {
 
   const createNewSession = () => {
     clearMessages()
+    // Reset anonymous pagination state
+    if (!isAuthenticated) {
+      setAnonMessages([])
+      setAnonMessagesHasMore(false)
+      setAnonMessagesCursor(null)
+    }
     navigate({ to: '/', search: {} })
   }
 
   const selectSession = (id: string) => {
     clearMessages()
+    // Reset anonymous messages pagination state
+    if (!isAuthenticated) {
+      setAnonMessages([])
+      setAnonMessagesHasMore(false)
+      setAnonMessagesCursor(null)
+    }
     navigate({ to: '/', search: { sessionId: id } })
   }
 
@@ -337,8 +425,10 @@ function ChatPage() {
       await deleteSessionMutation({ sessionId: id })
     } else {
       deleteAnonSession(id)
-      setAnonSessions(getAnonSessions())
-      setAnonMessages(getAnonMessages(sessionId || ''))
+      loadAnonSessions(true)
+      if (sessionId) {
+        loadAnonMessages(sessionId, true)
+      }
     }
     if (sessionId === id) {
       clearMessages()
@@ -352,6 +442,23 @@ function ChatPage() {
     sendMessage(inputValue)
     setInputValue('')
   }
+
+  // Handlers for loading more
+  const handleLoadMoreSessions = useCallback(() => {
+    if (isAuthenticated) {
+      loadMoreSessions(20)
+    } else {
+      loadAnonSessions(false)
+    }
+  }, [isAuthenticated, loadMoreSessions, loadAnonSessions])
+
+  const handleLoadMoreMessages = useCallback(() => {
+    if (isAuthenticated) {
+      loadMoreMessages(50)
+    } else if (sessionId) {
+      loadAnonMessages(sessionId, false)
+    }
+  }, [isAuthenticated, loadMoreMessages, loadAnonMessages, sessionId])
 
   // Get sessions for display
   const displaySessions = isAuthenticated
@@ -373,6 +480,9 @@ function ChatPage() {
           onNewChat={createNewSession}
           onSelectSession={selectSession}
           onDeleteSession={handleDeleteSession}
+          hasMore={isAuthenticated ? sessionsHasMore : anonSessionsHasMore}
+          isLoadingMore={isAuthenticated ? isLoadingMoreSessions : false}
+          onLoadMore={handleLoadMoreSessions}
         />
 
         <div className="flex flex-1 flex-col">
@@ -382,7 +492,13 @@ function ChatPage() {
             onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
           />
 
-          <ChatMessages messages={allMessages} ref={messagesEndRef} />
+          <ChatMessages
+            messages={allMessages}
+            ref={chatMessagesRef}
+            hasMore={isAuthenticated ? messagesHasMore : anonMessagesHasMore}
+            isLoadingMore={isAuthenticated ? isLoadingMoreMessages : false}
+            onLoadMore={handleLoadMoreMessages}
+          />
 
           <ChatInput
             ref={inputRef}
